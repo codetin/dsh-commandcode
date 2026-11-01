@@ -1,6 +1,6 @@
 {
   "name": "dsh-commandcode",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Command Code provider for dsh: stream the Go/GOAT/Pro/Max model catalog through /alpha/generate and never hit the Provider-API 403",
   "license": "MIT",
   "repository": {

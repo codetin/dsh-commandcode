@@ -1,0 +1,81 @@
+{
+  "name": "dsh-commandcode",
+  "version": "0.1.0",
+  "description": "Command Code provider for dsh: stream the Go/GOAT/Pro/Max model catalog through /alpha/generate and never hit the Provider-API 403",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/codetin/dsh-commandcode-provider.git"
+  },
+  "type": "module",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.png",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "lib/*.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.png",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "dsh-bundle",
+    "deepseek-harness",
+    "commandcode",
+    "command-code",
+    "llm-provider"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "compatibility": {
+      "dsh": ">=0.2.0-rc.2 <0.3",
+      "dshReleases": {
+        "0.2.1-rc.5": "compatible"
+      },
+      "profiles": [
+        "web",
+        "headless"
+      ]
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-slots",
+        "@deepseek-ai/dsh-api-remotes",
+        "@deepseek-ai/dsh-client-ui-settings-models"
+      ]
+    }
+  },
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-attachment": ">=0.2.0-rc.2 <0.3",
+    "@deepseek-ai/dsh-llm": ">=0.2.0-rc.2 <0.3",
+    "@deepseek-ai/schemastery": "^3.18.3"
+  },
+  "devDependencies": {
+    "@deepseek-ai/dsh-attachment": "0.2.1-rc.5",
+    "@deepseek-ai/dsh-llm": "0.2.1-rc.5",
+    "@deepseek-ai/schemastery": "3.18.5"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "live": "node test/live.mjs"
+  }
+}

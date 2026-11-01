@@ -1,0 +1,10 @@
+# Dependencies and install artifacts
+node_modules/
+package/
+
+# npm pack / publish scratch
+*.tgz
+.npm-cache/
+
+# Editor and OS noise
+.DS_Store

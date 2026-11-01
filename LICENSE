@@ -1,6 +1,10 @@
 MIT License
 
-Copyright (c) 2026 Jie Wu
+Copyright (c) 2026 code_tin
+
+Portions of the protocol translation and provider architecture are derived
+from `dsh-commandcode-go-provider` (Copyright (c) 2026 jiesou, MIT) and
+`opencode-commandcode-provider`; their notices are retained here.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

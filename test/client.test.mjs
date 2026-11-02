@@ -421,6 +421,22 @@ function quotaTrigger(tree) {
   return elements(tree).find(element => element.type === 'button' && element.props['aria-haspopup'] === 'dialog')
 }
 
+/**
+ * Mount the quota entry with the standard session projection seat the slot kit
+ * would supply. The default selects a Command Code model.
+ * @param rendered - the React stand-in mount surface.
+ * @param quota - the registered dock entry.
+ * @param [projection] - `useProjection` stand-in returning a modelSelection value.
+ * @returns the tree getter.
+ */
+function mountQuota(rendered, quota, projection) {
+  return rendered.mount(quota.component, {
+    ...quota.injected,
+    pollMs: 0,
+    useProjection: projection ?? (() => ({ next: { provider: 'commandcode', model: 'deepseek/deepseek-v4-flash' } })),
+  })
+}
+
 test('the quota pill shows 5-hour, weekly, and monthly used shares in the composer dock', async () => {
   const now = Date.now()
   const rpc = rpcFace({
@@ -447,7 +463,7 @@ test('the quota pill shows 5-hour, weekly, and monthly used shares in the compos
   const rendered = createReact()
   const card = await registerCard(rendered.react, { credentials: credentialOps([]), rpc: rpc.face })
   const quota = card.bySlot.get('conversation.composer.dock')
-  const tree = rendered.mount(quota.component, { ...quota.injected, pollMs: 0 })
+  const tree = mountQuota(rendered, quota)
 
   assert.equal(quotaTrigger(tree()), undefined, 'nothing renders before the first reading settles')
   await settled()
@@ -478,7 +494,7 @@ test('the quota pill stays hidden when no Command Code key is configured', async
   const rendered = createReact()
   const card = await registerCard(rendered.react, { credentials: credentialOps([]), rpc: rpc.face })
   const quota = card.bySlot.get('conversation.composer.dock')
-  const tree = rendered.mount(quota.component, { ...quota.injected, pollMs: 0 })
+  const tree = mountQuota(rendered, quota)
 
   await settled()
   assert.equal(tree(), null)
@@ -490,7 +506,7 @@ test('a failed quota reading keeps a quiet pill and explains itself in the panel
   const rendered = createReact()
   const card = await registerCard(rendered.react, { credentials: credentialOps([]), rpc: rpc.face })
   const quota = card.bySlot.get('conversation.composer.dock')
-  const tree = rendered.mount(quota.component, { ...quota.injected, pollMs: 0 })
+  const tree = mountQuota(rendered, quota)
 
   await settled()
   const trigger = quotaTrigger(tree())
@@ -499,4 +515,16 @@ test('a failed quota reading keeps a quiet pill and explains itself in the panel
   trigger.props.onClick()
   const panel = elements(tree()).find(element => element.props?.role === 'dialog')
   assert.match(textOf(panel), /quota\.failed\{"message":"HTTP 401"\}/)
+})
+
+test('the quota pill is hidden and never polled while another provider is selected', async () => {
+  const rpc = rpcFace({ ok: true, value: { configured: true } })
+  const rendered = createReact()
+  const card = await registerCard(rendered.react, { credentials: credentialOps([]), rpc: rpc.face })
+  const quota = card.bySlot.get('conversation.composer.dock')
+  const tree = mountQuota(rendered, quota, () => ({ next: { provider: 'deepseek', model: 'deepseek-v4' } }))
+
+  await settled()
+  assert.equal(tree(), null)
+  assert.equal(rpc.calls.length, 0, 'another provider never touches the Command Code quota API')
 })

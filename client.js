@@ -28,6 +28,8 @@ window.__ModuleLoader__.load({
     const CARD_KEY = 'commandcode-provider'
     /** Client locale namespace owned by this plugin. */
     const NS = 'commandcode'
+    /** Provider route id the quota belongs to; the dock entry is hidden for every other model. */
+    const PROVIDER_ID = 'commandcode'
     /** Host Remote namespace carrying the key test. */
     const RPC_NAMESPACE = 'commandcode'
 
@@ -125,6 +127,9 @@ window.__ModuleLoader__.load({
 
     /** How often the dock refreshes its reading; the host caches for 20 seconds. */
     const QUOTA_POLL_MS = 60_000
+
+    /** Stable fallback for slot contexts without the standard `useProjection` seat. */
+    const noProjection = () => undefined
 
     /** Credits are dollars in the billing API: whole caps stay whole, usage shows cents. */
     function quotaMoney(value) {
@@ -228,20 +233,28 @@ window.__ModuleLoader__.load({
 
     /**
      * Quota reading pinned in the composer dock — the status strip under the
-     * chat input. It shows the 5-hour, weekly, and monthly used shares and
-     * refreshes on mount, once a minute, and when the page becomes visible.
-     * Clicking opens the full reading with reset countdowns and the remaining
-     * credit balance; the 刷新 button bypasses the host's short cache.
-     * @param props - injected copy and the host quota call.
-     * @returns the pill and its panel.
+     * chat input. It is scoped to the session's selected model: only a
+     * `commandcode` provider renders it (and only then does it poll), so a
+     * DeepSeek conversation never shows a Command Code reading. It refreshes on
+     * activation, once a minute, and when the page becomes visible. Clicking
+     * opens the full reading with reset countdowns and the remaining credit
+     * balance; the 刷新 button bypasses the host's short cache.
+     * @param props - injected copy, the host quota call, and the session
+     *   projection selector the slot kit supplies.
+     * @returns the pill and its panel, or nothing for another provider.
      */
-    function QuotaBar({ t, fetchQuota, pollMs = QUOTA_POLL_MS }) {
+    function QuotaBar({ t, fetchQuota, useProjection, pollMs = QUOTA_POLL_MS }) {
       const [state, setState] = React.useState({ phase: 'loading' })
       const [open, setOpen] = React.useState(false)
       const [refreshing, setRefreshing] = React.useState(false)
       const rootRef = React.useRef(null)
       const alive = React.useRef(true)
       const ticket = React.useRef(0)
+      // The standard session kit exposes the durable model selection as the
+      // `modelSelection` projection; `next` is the active provider/model.
+      const project = typeof useProjection === 'function' ? useProjection : noProjection
+      const selection = project('modelSelection')
+      const active = selection?.next?.provider === PROVIDER_ID
 
       const load = React.useCallback(async (force) => {
         const current = ++ticket.current
@@ -263,7 +276,17 @@ window.__ModuleLoader__.load({
         }
       }, [fetchQuota])
 
+      // Collapse the popover and drop a refresh spinner when the model leaves
+      // Command Code; the pill itself is unmounted below, so neither a stale
+      // panel nor a stuck spinner may reopen on the way back.
       React.useEffect(() => {
+        if (active) return
+        if (open) setOpen(false)
+        if (refreshing) setRefreshing(false)
+      }, [active, open, refreshing])
+
+      React.useEffect(() => {
+        if (!active) return undefined
         alive.current = true
         void load(false)
         let timer
@@ -277,7 +300,7 @@ window.__ModuleLoader__.load({
           if (timer !== undefined) clearInterval(timer)
           if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', visible)
         }
-      }, [load, pollMs])
+      }, [active, load, pollMs])
 
       React.useEffect(() => {
         if (!open || typeof document === 'undefined') return undefined
@@ -295,7 +318,7 @@ window.__ModuleLoader__.load({
         }
       }, [open])
 
-      if (state.phase === 'loading' || state.phase === 'empty') return null
+      if (!active || state.phase === 'loading' || state.phase === 'empty') return null
 
       const ready = state.phase === 'ready'
       const rows = ready ? quotaRows(state.data, t, Date.now()) : []

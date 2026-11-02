@@ -20,7 +20,7 @@
 - **图片**：按 DSH 的路由预算重编码（单图 1 MiB、2048² 像素预算），超过单次请求 base64 预算时抛出 `IMAGE_OFFLOAD_REQUIRED`，由 DSH 记录最旧图片为 offload 后重试。
 - **动态目录**：启动时扫描，之后按 `refreshMinutes` 重扫；扫描失败保留上一份目录并 60 秒后重试，不会拖垮插件。
 - **密钥卡片**：Command Code 卡片默认只显示「已配置 / 未配置」和一枚按钮，点 **配置密钥**（已配置后是 **编辑密钥**）才展开输入框——和内置的 DeepSeek Official 一样是「点开才出现」，不会常驻一个空密码框。
-- **额度状态栏**：对话输入框下方的状态栏显示 Command Code 的 **5 小时 / 周 / 月** 已用比例；点击展开剩余额度、重置倒计时和当前套餐，支持手动刷新。未配置 key 时整条指示隐藏。
+- **额度状态栏**：当前会话选择 Command Code 模型时，对话输入框下方的状态栏显示 **5 小时 / 周 / 月** 已用比例；点击展开剩余额度、重置倒计时和当前套餐，支持手动刷新。切到其他 provider 或未配置 key 时整条指示隐藏，也不会轮询额度接口。
 - **多账号**：暂不支持（一个 provider 一个 key）。需要多账号时用不同 `DSH_HOME` 或后续扩展。
 
 ## 安装
@@ -92,7 +92,7 @@ records: {}
 
 ## 额度状态栏
 
-对话输入框下方的状态栏（`conversation.composer.dock`）会多出一枚额度指示：
+当前会话选中的是 Command Code 模型时，对话输入框下方的状态栏（`conversation.composer.dock`）会多出一枚额度指示：
 
 ```
 ▤ 5小时 20% · 周 26% · 月 16%
@@ -108,7 +108,7 @@ records: {}
 
 5 小时与周比例是服务端原值；**月度比例是推算值**：`已用 = 套餐月度 credits − monthlyCredits`，套餐上限取自官方 CLI 的映射表（Go 10、GOAT 70、Pro 30/80、Max 150、Ultra 300、Teams Pro 40）。遇到未知套餐时只显示两个滚动窗口，不会编造月度上限。
 
-宿主侧把一次读数缓存 20 秒，浏览器端在挂载时、每分钟、页面重新可见时刷新；面板里的 **刷新** 会强制绕过缓存。没有配置 `COMMANDCODE_API_KEY` 时，额度指示不渲染，也不会产生任何上游请求。
+显示条件来自会话的 `modelSelection` projection：只有 `next.provider === 'commandcode'` 时才渲染并开始轮询；切换到 DeepSeek 等其他模型会立即隐藏并停止轮询，切回来再重新读取。宿主侧把一次读数缓存 20 秒，浏览器端在激活时、每分钟、页面重新可见时刷新；面板里的 **刷新** 会强制绕过缓存。没有配置 `COMMANDCODE_API_KEY` 时，额度指示不渲染，也不会产生任何上游请求。
 
 > 从 0.1.x 升级时，额度查询方法注册在宿主进程里，需要**重启一次 dsh**（Desktop 用户重启应用）才会生效；之后只改 `client.js` 的话刷新页面即可。
 
@@ -116,7 +116,7 @@ records: {}
 
 ```sh
 pnpm install
-pnpm test    # 58 个单元测试：catalog / protocol / adapter / usage / client / package
+pnpm test    # 59 个单元测试：catalog / protocol / adapter / usage / client / package
 pnpm live    # 真实网关请求，需已配置 key；会打印 usage 与 finish
 ```
 

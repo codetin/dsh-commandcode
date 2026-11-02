@@ -46,11 +46,14 @@ async function loadClient(react) {
 
 /**
  * A React stand-in that keeps hook state across synchronous re-renders, so a
- * handler's `useState` write is visible in the tree read right after it.
+ * handler's `useState` write is visible in the tree read right after it. Mount
+ * effects run once, after the first draw; `pollMs: 0` keeps the quota pill from
+ * starting a real interval inside the test process.
  * @returns the react face plus a mount that renders a component into it.
  */
 function createReact() {
-  const slots = []
+  const hooks = []
+  const effects = []
   let cursor = 0
   let draw = () => {}
   const react = {
@@ -60,18 +63,33 @@ function createReact() {
     useState(initial) {
       const slot = cursor
       cursor += 1
-      if (!(slot in slots)) slots[slot] = typeof initial === 'function' ? initial() : initial
-      return [slots[slot], (next) => {
-        slots[slot] = typeof next === 'function' ? next(slots[slot]) : next
+      if (!(slot in hooks)) hooks[slot] = typeof initial === 'function' ? initial() : initial
+      return [hooks[slot], (next) => {
+        hooks[slot] = typeof next === 'function' ? next(hooks[slot]) : next
         draw()
       }]
+    },
+    useRef(initial) {
+      const slot = cursor
+      cursor += 1
+      if (!(slot in hooks)) hooks[slot] = { current: initial }
+      return hooks[slot]
+    },
+    useCallback(callback) {
+      cursor += 1
+      return callback
+    },
+    useEffect(effect) {
+      cursor += 1
+      effects.push(effect)
     },
   }
   return {
     react,
     mount(component, props) {
       // A new mount is a new component instance: start from empty hook state.
-      slots.length = 0
+      hooks.length = 0
+      effects.length = 0
       cursor = 0
       let tree
       draw = () => {
@@ -79,6 +97,7 @@ function createReact() {
         tree = component(props)
       }
       draw()
+      for (const effect of effects) effect()
       return () => tree
     },
   }
@@ -88,14 +107,14 @@ function createReact() {
 const t = (key, values) => (values === undefined ? key : `${key}${JSON.stringify(values)}`)
 
 /**
- * A client context that captures the registered card and its inject face.
+ * A client context that captures every registered slot and its inject face.
  * @param react - the React stand-in the loaded factory sees.
  * @param faces - credential operations and the browser rpc face.
- * @returns registration facts, the component, and the card's own props.
+ * @returns the key card registration plus every slot by name.
  */
 async function registerCard(react, faces) {
   const loaded = await loadClient(react)
-  const registration = { component: undefined, injected: undefined }
+  const registrations = new Map()
   const ctx = {
     effect(fn) {
       const dispose = fn()
@@ -109,8 +128,7 @@ async function registerCard(react, faces) {
     slots: {
       inject: (name, callback) => callback(),
       register(opts, component) {
-        registration.component = component
-        registration.injected = opts.inject()
+        registrations.set(opts.name, { component, injected: opts.inject(), opts })
         return () => {}
       },
     },
@@ -118,8 +136,9 @@ async function registerCard(react, faces) {
     get: key => (key === 'connection' ? { rpc: faces.rpc } : undefined),
   }
   loaded.module.apply(ctx)
-  assert.equal(typeof registration.component, 'function')
-  return registration
+  const card = registrations.get('settings.models.provider-card')
+  assert.equal(typeof card?.component, 'function')
+  return { ...card, bySlot: registrations }
 }
 
 /** Every element of a rendered tree, depth first. */
@@ -193,8 +212,8 @@ function rpcFace(answer) {
   }
 }
 
-test('client half registers the Command Code key card on the Models page slot', async () => {
-  const calls = { effects: 0, register: undefined, slot: undefined, locale: undefined }
+test('client half registers the key card and the composer quota pill', async () => {
+  const calls = { effects: 0, slots: [], registrations: [], locale: undefined }
   const loaded = await loadClient({
     createElement: () => ({}),
     useState: initial => [initial, () => {}],
@@ -221,12 +240,12 @@ test('client half registers the Command Code key card on the Models page slot', 
     },
     slots: {
       inject(name, callback) {
-        calls.slot = name
+        calls.slots.push(name)
         callback()
         return () => {}
       },
       register(opts, component) {
-        calls.register = { opts, component }
+        calls.registrations.push({ opts, component, injected: opts.inject() })
         return () => {}
       },
     },
@@ -245,20 +264,28 @@ test('client half registers the Command Code key card on the Models page slot', 
   assert.equal(calls.effects, 1)
   assert.equal(calls.locale.ns, 'commandcode')
   for (const dict of [calls.locale.dicts.zh, calls.locale.dicts.en]) {
-    for (const key of ['label', 'edit', 'test', 'testing', 'cancel', 'save', 'testOk', 'testFailed', 'saved', 'empty', 'noHost']) {
+    for (const key of [
+      'label', 'edit', 'test', 'testing', 'cancel', 'save', 'testOk', 'testFailed', 'saved', 'empty', 'noHost',
+      'quota.fiveHour', 'quota.weekly', 'quota.monthly', 'quota.title', 'quota.refresh', 'quota.failed',
+    ]) {
       assert.equal(typeof dict[key], 'string', `${key} copy is missing`)
     }
   }
-  assert.equal(calls.slot, 'settings.models.provider-card')
-  assert.equal(calls.register.opts.name, 'settings.models.provider-card')
-  assert.equal(calls.register.opts.key, 'commandcode-provider')
-  assert.equal(typeof calls.register.component, 'function')
+  assert.deepEqual(calls.slots, ['settings.models.provider-card', 'conversation.composer.dock'])
 
-  const injected = calls.register.opts.inject()
-  assert.equal(injected.keyRef, 'COMMANDCODE_API_KEY')
-  assert.equal(injected.t('label'), 'label')
-  assert.equal(await injected.saveKey('user_test'), undefined)
-  await assert.rejects(injected.testKey('user_test'), /noHost/)
+  const card = calls.registrations.find(entry => entry.opts.name === 'settings.models.provider-card')
+  assert.equal(card.opts.key, 'commandcode-provider')
+  assert.equal(typeof card.component, 'function')
+  assert.equal(card.injected.keyRef, 'COMMANDCODE_API_KEY')
+  assert.equal(card.injected.t('label'), 'label')
+  assert.equal(await card.injected.saveKey('user_test'), undefined)
+  await assert.rejects(card.injected.testKey('user_test'), /noHost/)
+
+  const quota = calls.registrations.find(entry => entry.opts.name === 'conversation.composer.dock')
+  assert.equal(quota.opts.id, 'commandcode-quota')
+  assert.equal(quota.opts.order, 2)
+  assert.equal(typeof quota.component, 'function')
+  assert.equal(typeof quota.injected.fetchQuota, 'function')
 })
 
 test('the card stays collapsed until 编辑, then tests the typed key through the host', async () => {
@@ -387,4 +414,89 @@ test('取消 discards the draft and the outcome it produced', async () => {
 
   labelled(tree(), 'button', t('edit')).props.onClick()
   assert.equal(field(tree()).props.value, '', 'the discarded draft does not come back')
+})
+
+/** The quota pill button, or undefined while the reading is hidden. */
+function quotaTrigger(tree) {
+  return elements(tree).find(element => element.type === 'button' && element.props['aria-haspopup'] === 'dialog')
+}
+
+test('the quota pill shows 5-hour, weekly, and monthly used shares in the composer dock', async () => {
+  const now = Date.now()
+  const rpc = rpcFace({
+    ok: true,
+    value: {
+      configured: true,
+      fetchedAt: now,
+      plan: { id: 'individual-go-v1', name: 'Go' },
+      windows: {
+        fiveHour: { used: 0.504704482, limit: 3, percent: 16.8, resetsAt: now + 3 * 3_600_000 },
+        weekly: { used: 1.4646618919, limit: 6, percent: 24.4, resetsAt: now + 2 * 86_400_000 },
+      },
+      monthly: {
+        used: 1.4646618919,
+        limit: 10,
+        percent: 14.6,
+        remaining: 8.5353381081,
+        renewsAt: now + 27 * 86_400_000,
+      },
+      balance: { purchased: 0, free: 0 },
+      exceeded: false,
+    },
+  })
+  const rendered = createReact()
+  const card = await registerCard(rendered.react, { credentials: credentialOps([]), rpc: rpc.face })
+  const quota = card.bySlot.get('conversation.composer.dock')
+  const tree = rendered.mount(quota.component, { ...quota.injected, pollMs: 0 })
+
+  assert.equal(quotaTrigger(tree()), undefined, 'nothing renders before the first reading settles')
+  await settled()
+
+  const trigger = quotaTrigger(tree())
+  assert.equal(textOf(trigger), 'quota.fiveHour 17% · quota.weekly 24% · quota.monthly 15%')
+  assert.equal(trigger.props['aria-label'], t('quota.aria', { summary: textOf(trigger) }))
+
+  trigger.props.onClick()
+  const panel = elements(tree()).find(element => element.props?.role === 'dialog')
+  assert.ok(panel !== undefined)
+  const panelText = textOf(panel)
+  assert.match(panelText, /quota\.usedOf\{"used":"\$0\.50","limit":"\$3"\}/)
+  assert.match(panelText, /quota\.usedOf\{"used":"\$1\.46","limit":"\$10"\}/)
+  assert.match(panelText, /quota\.remaining\{"remaining":"\$8\.54"\}/)
+  assert.match(panelText, /quota\.resetsIn/)
+
+  const refresh = elements(tree()).find(element => element.type === 'button' && textOf(element) === t('quota.refresh'))
+  assert.ok(refresh !== undefined)
+  refresh.props.onClick()
+  await settled()
+  assert.equal(rpc.calls.length, 2)
+  assert.deepEqual(rpc.calls[1].payload, { args: { force: true } })
+})
+
+test('the quota pill stays hidden when no Command Code key is configured', async () => {
+  const rpc = rpcFace({ ok: true, value: { configured: false } })
+  const rendered = createReact()
+  const card = await registerCard(rendered.react, { credentials: credentialOps([]), rpc: rpc.face })
+  const quota = card.bySlot.get('conversation.composer.dock')
+  const tree = rendered.mount(quota.component, { ...quota.injected, pollMs: 0 })
+
+  await settled()
+  assert.equal(tree(), null)
+  assert.equal(rpc.calls.length, 1)
+})
+
+test('a failed quota reading keeps a quiet pill and explains itself in the panel', async () => {
+  const rpc = rpcFace({ ok: false, error: { message: 'HTTP 401' } })
+  const rendered = createReact()
+  const card = await registerCard(rendered.react, { credentials: credentialOps([]), rpc: rpc.face })
+  const quota = card.bySlot.get('conversation.composer.dock')
+  const tree = rendered.mount(quota.component, { ...quota.injected, pollMs: 0 })
+
+  await settled()
+  const trigger = quotaTrigger(tree())
+  assert.equal(textOf(trigger), t('quota.unavailable'))
+
+  trigger.props.onClick()
+  const panel = elements(tree()).find(element => element.props?.role === 'dialog')
+  assert.match(textOf(panel), /quota\.failed\{"message":"HTTP 401"\}/)
 })

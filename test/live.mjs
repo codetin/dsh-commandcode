@@ -12,6 +12,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { CommandCodeAdapter, DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_REQUEST_IMAGE_BYTES, DEFAULT_MAX_TOKENS } from '../lib/adapter.js'
+import { fetchUsage } from '../lib/usage.js'
 import { fetchCliVersion } from '../lib/version.js'
 
 function apiKey() {
@@ -63,4 +64,17 @@ for await (const chunk of adapter.stream({
   }
 }
 if (answer.trim() !== 'pong') throw new Error(`unexpected answer: ${JSON.stringify(answer)}`)
+
+// The same read-only billing routes the composer status bar consumes.
+try {
+  const snapshot = await fetchUsage({ apiKey: apiKey(), cliVersion })
+  const share = value => (typeof value === 'number' ? `${Math.round(value)}%` : '—')
+  console.log('quota:', `5h ${share(snapshot.windows.fiveHour?.percent)}`,
+    `weekly ${share(snapshot.windows.weekly?.percent)}`,
+    `monthly ${share(snapshot.monthly?.percent)}`,
+    snapshot.plan === undefined ? '' : `plan=${snapshot.plan.name}`)
+} catch (error) {
+  console.log('quota: unavailable —', error instanceof Error ? error.message : String(error))
+}
+
 console.log('\nlive check passed')

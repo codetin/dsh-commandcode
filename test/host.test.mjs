@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { apply } from '../index.js'
+import { DEFAULT_CLI_VERSION } from '../lib/version.js'
 
 const MARKDOWN = `# Command Code Models
 
@@ -182,6 +183,147 @@ test('a refused key test reports the gateway diagnostic', async () => {
         return true
       },
     )
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+const CREDITS = {
+  credits: { monthlyCredits: 8.5353381081, purchasedCredits: 0, freeCredits: 0 },
+  windowLimits: {
+    limited: true,
+    exceeded: null,
+    fiveHour: { used: 0.504704482, cap: 3, exceeded: false, resetAt: 1_793_625_222_415 },
+    weekly: { used: 1.4646618919, cap: 6, exceeded: false, resetAt: 1_794_055_729_655 },
+  },
+}
+
+const SUBSCRIPTION = {
+  success: true,
+  data: {
+    planId: 'individual-go-v1',
+    status: 'active',
+    currentPeriodEnd: '2026-11-30T12:45:32.000Z',
+  },
+}
+
+/**
+ * Stub the billing routes plus the catalog endpoints `apply` scans in the
+ * background.
+ * @param {object} [options] - billing fixtures and the subscription status.
+ * @returns the fetch stand-in plus every request it recorded.
+ */
+function usageFetch({ credits = CREDITS, subscription = SUBSCRIPTION, subscriptionStatus = 200 } = {}) {
+  const requests = []
+  const record = (url, init) => {
+    requests.push({ url, headers: init.headers })
+  }
+  const fetchImpl = async (url, init) => {
+    const target = String(url)
+    if (target.includes('/alpha/whoami')) {
+      record(target, init)
+      return json({ user: { userName: 'codetin' }, org: { id: 'org_123' } })
+    }
+    if (target.includes('/alpha/billing/credits')) {
+      record(target, init)
+      return json(credits)
+    }
+    if (target.includes('/alpha/billing/subscriptions')) {
+      record(target, init)
+      return subscriptionStatus === 200
+        ? json(subscription)
+        : new Response('subscription unavailable', { status: subscriptionStatus })
+    }
+    if (target.includes('/provider/v1/models')) return json(LISTING)
+    if (target.includes('registry.npmjs.org')) return json({ version: '1.90.0' })
+    if (target.includes('command-code')) return new Response(MARKDOWN, { status: 200 })
+    throw new Error(`unexpected fetch: ${target}`)
+  }
+  return { fetchImpl, requests }
+}
+
+/** Billing calls only; the background catalog scan is irrelevant to these cases. */
+function billingCalls(requests, kind) {
+  return requests.filter(request => request.url.includes(`/alpha/billing/${kind}`))
+}
+
+test('the usage remote reports the 5-hour, weekly, and derived monthly used shares', async () => {
+  const originalFetch = globalThis.fetch
+  const { fetchImpl, requests } = usageFetch()
+  globalThis.fetch = fetchImpl
+  try {
+    const { ctx, remote } = context({ storedKey: 'user_stored' })
+    apply(ctx, config())
+    const snapshot = await remote.get('commandcodeRemote').usage(true)
+
+    assert.equal(snapshot.configured, true)
+    assert.equal(snapshot.plan.name, 'Go')
+    assert.equal(snapshot.plan.monthlyCredits, 10)
+    assert.ok(Math.abs(snapshot.windows.fiveHour.percent - 16.823482733333333) < 1e-9)
+    assert.ok(Math.abs(snapshot.windows.weekly.percent - 24.411031531666667) < 1e-9)
+    assert.ok(Math.abs(snapshot.monthly.percent - 14.646618919) < 1e-9)
+    assert.equal(snapshot.monthly.remaining, 8.5353381081)
+    assert.equal(snapshot.windows.fiveHour.resetsAt, 1_793_625_222_415)
+
+    const [creditsCall] = billingCalls(requests, 'credits')
+    assert.equal(creditsCall.url, 'https://api.commandcode.ai/alpha/billing/credits?orgId=org_123')
+    assert.equal(creditsCall.headers.authorization, 'Bearer user_stored')
+    assert.equal(creditsCall.headers['x-command-code-version'], DEFAULT_CLI_VERSION)
+    assert.equal(billingCalls(requests, 'subscriptions')[0].url,
+      'https://api.commandcode.ai/alpha/billing/subscriptions?orgId=org_123')
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('a cached reading is reused until a refresh is forced', async () => {
+  const originalFetch = globalThis.fetch
+  const { fetchImpl, requests } = usageFetch()
+  globalThis.fetch = fetchImpl
+  try {
+    const { ctx, remote } = context({ storedKey: 'user_stored' })
+    apply(ctx, config())
+    const service = remote.get('commandcodeRemote')
+
+    await service.usage(false)
+    await service.usage(false)
+    assert.equal(billingCalls(requests, 'credits').length, 1)
+
+    await service.usage(true)
+    assert.equal(billingCalls(requests, 'credits').length, 2)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('an unconfigured key hides the quota instead of failing the remote call', async () => {
+  const originalFetch = globalThis.fetch
+  const previousKey = process.env.COMMANDCODE_API_KEY
+  const { fetchImpl, requests } = usageFetch()
+  globalThis.fetch = fetchImpl
+  delete process.env.COMMANDCODE_API_KEY
+  try {
+    const { ctx, remote } = context()
+    apply(ctx, config())
+    assert.deepEqual(await remote.get('commandcodeRemote').usage(true), { configured: false })
+    assert.equal(requests.filter(request => request.url.includes('/alpha/billing')).length, 0)
+  } finally {
+    if (previousKey !== undefined) process.env.COMMANDCODE_API_KEY = previousKey
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('a failed subscription keeps the two rolling windows and hides only the monthly figure', async () => {
+  const originalFetch = globalThis.fetch
+  const { fetchImpl } = usageFetch({ subscriptionStatus: 500 })
+  globalThis.fetch = fetchImpl
+  try {
+    const { ctx, remote } = context({ storedKey: 'user_stored' })
+    apply(ctx, config())
+    const snapshot = await remote.get('commandcodeRemote').usage(true)
+    assert.equal(snapshot.monthly, undefined)
+    assert.ok(snapshot.windows.fiveHour.percent > 0)
+    assert.ok(snapshot.windows.weekly.percent > 0)
   } finally {
     globalThis.fetch = originalFetch
   }

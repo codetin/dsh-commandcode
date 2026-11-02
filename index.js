@@ -32,6 +32,7 @@ import {
 } from './lib/adapter.js'
 import { DEFAULT_PLAN, PLAN_ORDER, fetchCatalog, fetchPlanModels } from './lib/catalog.js'
 import { registerRemoteService } from './lib/remote.js'
+import { fetchUsage } from './lib/usage.js'
 import { DEFAULT_CLI_VERSION, fetchCliVersion } from './lib/version.js'
 
 export {
@@ -55,6 +56,21 @@ export {
   planIncludes,
   planTier,
 } from './lib/catalog.js'
+export {
+  CREDITS_PATH,
+  PLAN_MONTHLY_CREDITS,
+  SUBSCRIPTIONS_PATH,
+  USAGE_TIMEOUT_MS,
+  WHOAMI_PATH,
+  fetchUsage,
+  normalizeUsage,
+  parseCredits,
+  parseOrgId,
+  parseSubscription,
+  planInfo,
+  toEpochMs,
+  usagePercent,
+} from './lib/usage.js'
 export { DEFAULT_CLI_VERSION, fetchCliVersion } from './lib/version.js'
 export {
   GATEWAY_EFFORTS,
@@ -92,6 +108,11 @@ const TEST_MAX_TOKENS = 64
 const TEST_TIMEOUT_MS = 60_000
 /** Model a key test falls back to while the live catalog is still empty. */
 const TEST_FALLBACK_MODEL = 'deepseek/deepseek-v4-flash'
+/**
+ * How long one quota reading is reused across browser tabs and composer
+ * remounts. A manual refresh passes `force` and skips it.
+ */
+const USAGE_CACHE_MS = 20_000
 
 /**
  * Plugin configuration, validated by the same-named schemastery schema and
@@ -167,28 +188,42 @@ export function apply(ctx, config) {
   let markReady
   const ready = new Promise((resolve) => { markReady = resolve })
 
+  // One fixed reference keeps the Models page's derived credential name, its
+  // configured/missing dot, and the key input on the same entry.
+  const CREDENTIAL_REF = DEFAULT_API_KEY_ENV
+
+  /**
+   * Read the stored credential — or the ambient variable when the credentials
+   * service is absent — without asserting it. The quota status bar treats an
+   * absent key as "hide the indicator", not as a failed request.
+   * @returns {Promise<string | undefined>} the raw key, when one is configured.
+   */
+  async function storedApiKey() {
+    const credentials = ctx.get('credentials')
+    if (credentials !== undefined) {
+      const hit = await credentials.resolve(CREDENTIAL_REF)
+      const stored = typeof hit?.value === 'string' ? hit.value.trim() : ''
+      return stored.length > 0 ? stored : undefined
+    }
+    const ambient = process.env[CREDENTIAL_REF]?.trim()
+    return ambient !== undefined && ambient.length > 0 ? ambient : undefined
+  }
+
   const adapter = new CommandCodeAdapter({
     connection: () => current,
     models: () => models,
     ready: () => ready,
     resolveApiKey: async () => {
-      // One fixed reference keeps the Models page's derived credential name,
-      // its configured/missing dot, and the key input on the same entry.
-      const ref = DEFAULT_API_KEY_ENV
-      const credentials = ctx.get('credentials')
-      if (credentials !== undefined) {
-        const hit = await credentials.resolve(ref)
-        if (hit !== undefined) return assertUsableApiKey(hit.value, PACKAGE_NAME, ref)
-      } else {
-        const ambient = process.env[ref]
-        if (ambient !== undefined && ambient.length > 0) return assertUsableApiKey(ambient, PACKAGE_NAME, ref)
+      const value = await storedApiKey()
+      if (value === undefined) {
+        throw new LlmError(
+          `${PACKAGE_NAME}: no API key for provider "${PROVIDER_ID}"; store ${CREDENTIAL_REF} through the credentials`
+          + ` service (the Models page writes it, under refs: in ~/.dsh/.credentials.yaml), or export`
+          + ` ${CREDENTIAL_REF} in the launching environment`,
+          'MISSING_CREDENTIAL',
+        )
       }
-      throw new LlmError(
-        `${PACKAGE_NAME}: no API key for provider "${PROVIDER_ID}"; store ${ref} through the credentials`
-        + ` service (the Models page writes it, under refs: in ~/.dsh/.credentials.yaml), or export`
-        + ` ${ref} in the launching environment`,
-        'MISSING_CREDENTIAL',
-      )
+      return assertUsableApiKey(value, PACKAGE_NAME, CREDENTIAL_REF)
     },
     // Resolved lazily: a deployment without the attachment service keeps serving
     // text-only traffic and fails loud only when an image actually arrives.
@@ -254,16 +289,53 @@ export function apply(ctx, config) {
     return { model, reply: answer.slice(0, 200) }
   }
 
+  /** Last successful quota reading, reused while its fingerprint and TTL match. */
+  let usageCache
+
+  /**
+   * Read the account's remaining quota for the status bar. An unconfigured key
+   * is reported as `configured: false` so the browser half can stay silent
+   * instead of showing a permanent error.
+   * @param {boolean} [force] - skip the short-lived cache.
+   * @returns {Promise<object>} the snapshot, or the unconfigured marker.
+   */
+  async function readUsage(force) {
+    const apiKey = await storedApiKey()
+    if (apiKey === undefined) return { configured: false }
+    const fingerprint = `${current.baseURL}\n${current.cliVersion}\n${apiKey}`
+    if (force !== true
+      && usageCache !== undefined
+      && usageCache.fingerprint === fingerprint
+      && Date.now() - usageCache.at < USAGE_CACHE_MS) {
+      return { configured: true, ...usageCache.snapshot }
+    }
+    const snapshot = await fetchUsage({
+      baseURL: current.baseURL,
+      apiKey,
+      cliVersion: current.cliVersion,
+    })
+    usageCache = { fingerprint, at: Date.now(), snapshot }
+    return { configured: true, ...snapshot }
+  }
+
   const unregisterRemote = registerRemoteService({
     ctx,
     serviceKey: REMOTE_SERVICE_KEY,
     namespace: REMOTE_NAMESPACE,
-    methods: [{
-      method: 'test',
-      implementation: async function test(apiKey) {
-        return testApiKey(apiKey)
+    methods: [
+      {
+        method: 'test',
+        implementation: async function test(apiKey) {
+          return testApiKey(apiKey)
+        },
       },
-    }],
+      {
+        method: 'usage',
+        implementation: async function usage(force) {
+          return readUsage(force)
+        },
+      },
+    ],
   })
 
   ctx.effect(() => () => {
@@ -332,6 +404,9 @@ export function apply(ctx, config) {
   ctx.on('loader/volatile-update', () => {
     const previousPlan = current.plan
     current = readConnection(config, cliVersion)
+    // A new base URL (or a re-read credential environment) invalidates the
+    // cached quota reading even when the plan itself did not change.
+    usageCache = undefined
     if (current.plan !== previousPlan) {
       ctx.logger.info('[commandcode] plan changed to %s; rescanning the catalog', current.plan)
       void syncCatalog().catch((error) => {

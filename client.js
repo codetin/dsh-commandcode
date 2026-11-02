@@ -51,6 +51,28 @@ window.__ModuleLoader__.load({
       empty: '请输入密钥。',
       failed: '保存失败：{message}',
       noHost: '浏览器连接服务不可用，无法测试。',
+      'quota.label': '额度',
+      'quota.fiveHour': '5小时',
+      'quota.weekly': '周',
+      'quota.monthly': '月',
+      'quota.title': 'Command Code 额度',
+      'quota.plan': '套餐 {plan}',
+      'quota.limited': '已触发额度限制',
+      'quota.usedOf': '已用 {used} / {limit}',
+      'quota.remaining': '剩余 {remaining}',
+      'quota.resetsIn': '{when}后重置',
+      'quota.renewsIn': '{when}后续期',
+      'quota.minutes': '{minutes} 分钟',
+      'quota.hoursMinutes': '{hours} 小时 {minutes} 分',
+      'quota.daysHours': '{days} 天 {hours} 小时',
+      'quota.updated': '更新于 {time}',
+      'quota.refresh': '刷新',
+      'quota.refreshing': '刷新中…',
+      'quota.failed': '读取失败：{message}',
+      'quota.unavailable': '额度 ?',
+      'quota.none': '暂无滚动额度窗口',
+      'quota.extra': '充值 {purchased} · 赠送 {free}',
+      'quota.aria': 'Command Code 额度：{summary}',
     }
 
     const en = {
@@ -72,11 +94,403 @@ window.__ModuleLoader__.load({
       empty: 'Enter a key first.',
       failed: 'Could not save: {message}',
       noHost: 'The browser connection service is unavailable, so the key cannot be tested.',
+      'quota.label': 'Quota',
+      'quota.fiveHour': '5h',
+      'quota.weekly': 'wk',
+      'quota.monthly': 'mo',
+      'quota.title': 'Command Code quota',
+      'quota.plan': '{plan} plan',
+      'quota.limited': 'Usage limit reached',
+      'quota.usedOf': '{used} of {limit} used',
+      'quota.remaining': '{remaining} left',
+      'quota.resetsIn': 'resets in {when}',
+      'quota.renewsIn': 'renews in {when}',
+      'quota.minutes': '{minutes}m',
+      'quota.hoursMinutes': '{hours}h {minutes}m',
+      'quota.daysHours': '{days}d {hours}h',
+      'quota.updated': 'Updated {time}',
+      'quota.refresh': 'Refresh',
+      'quota.refreshing': 'Refreshing…',
+      'quota.failed': 'Could not read quota: {message}',
+      'quota.unavailable': 'Quota ?',
+      'quota.none': 'No rolling quota windows reported',
+      'quota.extra': 'Extra {purchased} · free {free}',
+      'quota.aria': 'Command Code quota: {summary}',
     }
 
     /** Failure text of anything thrown across the card's awaits. */
     function detail(cause) {
       return cause instanceof Error ? cause.message : String(cause)
+    }
+
+    /** How often the dock refreshes its reading; the host caches for 20 seconds. */
+    const QUOTA_POLL_MS = 60_000
+
+    /** Credits are dollars in the billing API: whole caps stay whole, usage shows cents. */
+    function quotaMoney(value) {
+      if (typeof value !== 'number' || !Number.isFinite(value)) return '—'
+      return `$${Number.isInteger(value) ? String(value) : value.toFixed(2)}`
+    }
+
+    /** Rounded, bounded percentage for the compact pill and the panel value. */
+    function quotaPercent(value) {
+      if (typeof value !== 'number' || !Number.isFinite(value)) return '—'
+      return `${Math.round(Math.min(100, Math.max(0, value)))}%`
+    }
+
+    /** Time before a reset in the coarsest useful unit. */
+    function quotaCountdown(resetsAt, t, now) {
+      if (typeof resetsAt !== 'number' || !Number.isFinite(resetsAt)) return undefined
+      const minutes = Math.max(0, Math.ceil((resetsAt - now) / 60_000))
+      if (minutes < 60) return t('quota.minutes', { minutes })
+      const hours = Math.floor(minutes / 60)
+      if (hours < 24) return t('quota.hoursMinutes', { hours, minutes: minutes % 60 })
+      return t('quota.daysHours', { days: Math.floor(hours / 24), hours: hours % 24 })
+    }
+
+    /** Local clock time of the reading that fed the panel. */
+    function quotaClock(epoch) {
+      if (typeof epoch !== 'number' || !Number.isFinite(epoch)) return '—'
+      const date = new Date(epoch)
+      if (Number.isNaN(date.getTime())) return '—'
+      return date.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
+    }
+
+    /** Color ramp for a used share: normal, warning from 75%, error from 90%. */
+    function quotaTint(percent) {
+      if (percent >= 90) return 'var(--dsw-alias-state-error-primary)'
+      if (percent >= 75) return 'var(--dsw-alias-state-warn-primary)'
+      return 'var(--dsw-alias-state-business-primary)'
+    }
+
+    /**
+     * One row per reported quota: the two rolling windows and the derived
+     * monthly pool. Unknown windows are skipped rather than shown as zero.
+     * @param data - host usage snapshot.
+     * @param t - locale seat.
+     * @param now - reading time for countdowns.
+     * @returns rows carrying a label, a percentage, and detail lines.
+     */
+    function quotaRows(data, t, now) {
+      const rows = []
+      const addWindow = (key, label, window) => {
+        if (window === undefined || window === null || typeof window.percent !== 'number') return
+        const parts = []
+        if (typeof window.used === 'number' && typeof window.limit === 'number') {
+          parts.push(t('quota.remaining', { remaining: quotaMoney(Math.max(0, window.limit - window.used)) }))
+        }
+        const countdown = quotaCountdown(window.resetsAt, t, now)
+        if (countdown !== undefined) parts.push(t('quota.resetsIn', { when: countdown }))
+        rows.push({
+          key,
+          label,
+          percent: window.percent,
+          used: t('quota.usedOf', { used: quotaMoney(window.used), limit: quotaMoney(window.limit) }),
+          note: parts.length === 0 ? undefined : parts.join(' · '),
+        })
+      }
+      addWindow('fiveHour', t('quota.fiveHour'), data?.windows?.fiveHour)
+      addWindow('weekly', t('quota.weekly'), data?.windows?.weekly)
+      const monthly = data?.monthly
+      if (monthly !== undefined && monthly !== null && typeof monthly.percent === 'number') {
+        const parts = [t('quota.remaining', { remaining: quotaMoney(monthly.remaining) })]
+        const countdown = quotaCountdown(monthly.renewsAt, t, now)
+        if (countdown !== undefined) parts.push(t('quota.renewsIn', { when: countdown }))
+        const purchased = data?.balance?.purchased ?? 0
+        const free = data?.balance?.free ?? 0
+        if (purchased > 0 || free > 0) {
+          parts.push(t('quota.extra', { purchased: quotaMoney(purchased), free: quotaMoney(free) }))
+        }
+        rows.push({
+          key: 'monthly',
+          label: t('quota.monthly'),
+          percent: monthly.percent,
+          used: t('quota.usedOf', { used: quotaMoney(monthly.used), limit: quotaMoney(monthly.limit) }),
+          note: parts.join(' · '),
+        })
+      }
+      return rows
+    }
+
+    /** The compact one-line reading shared by the pill and its accessible name. */
+    function quotaSummary(rows) {
+      return rows.map(row => `${row.label} ${quotaPercent(row.percent)}`).join(' · ')
+    }
+
+    /** A small descending-bars glyph: the three quota windows, longest first. */
+    function QuotaIcon() {
+      return h('svg', { viewBox: '0 0 14 14', width: 14, height: 14, 'aria-hidden': true }, [
+        h('rect', { key: 'a', x: 1, y: 2.4, width: 12, height: 2.2, rx: 1.1, fill: 'currentColor', opacity: 0.9 }),
+        h('rect', { key: 'b', x: 1, y: 5.9, width: 8, height: 2.2, rx: 1.1, fill: 'currentColor', opacity: 0.65 }),
+        h('rect', { key: 'c', x: 1, y: 9.4, width: 4.5, height: 2.2, rx: 1.1, fill: 'currentColor', opacity: 0.4 }),
+      ])
+    }
+
+    /**
+     * Quota reading pinned in the composer dock — the status strip under the
+     * chat input. It shows the 5-hour, weekly, and monthly used shares and
+     * refreshes on mount, once a minute, and when the page becomes visible.
+     * Clicking opens the full reading with reset countdowns and the remaining
+     * credit balance; the 刷新 button bypasses the host's short cache.
+     * @param props - injected copy and the host quota call.
+     * @returns the pill and its panel.
+     */
+    function QuotaBar({ t, fetchQuota, pollMs = QUOTA_POLL_MS }) {
+      const [state, setState] = React.useState({ phase: 'loading' })
+      const [open, setOpen] = React.useState(false)
+      const [refreshing, setRefreshing] = React.useState(false)
+      const rootRef = React.useRef(null)
+      const alive = React.useRef(true)
+      const ticket = React.useRef(0)
+
+      const load = React.useCallback(async (force) => {
+        const current = ++ticket.current
+        try {
+          const answer = await fetchQuota(force === true)
+          if (!alive.current || current !== ticket.current) return
+          if (answer !== undefined && answer !== null && answer.configured === false) {
+            setState({ phase: 'empty' })
+            return
+          }
+          if (answer === undefined || answer === null || typeof answer !== 'object') {
+            setState({ phase: 'error', error: 'empty response' })
+            return
+          }
+          setState({ phase: 'ready', data: answer })
+        } catch (cause) {
+          if (!alive.current || current !== ticket.current) return
+          setState({ phase: 'error', error: detail(cause) })
+        }
+      }, [fetchQuota])
+
+      React.useEffect(() => {
+        alive.current = true
+        void load(false)
+        let timer
+        if (pollMs > 0) timer = setInterval(() => { void load(true) }, pollMs)
+        const visible = () => {
+          if (typeof document !== 'undefined' && document.visibilityState === 'visible') void load(true)
+        }
+        if (typeof document !== 'undefined') document.addEventListener('visibilitychange', visible)
+        return () => {
+          alive.current = false
+          if (timer !== undefined) clearInterval(timer)
+          if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', visible)
+        }
+      }, [load, pollMs])
+
+      React.useEffect(() => {
+        if (!open || typeof document === 'undefined') return undefined
+        const outside = (event) => {
+          if (rootRef.current !== null && !rootRef.current.contains(event.target)) setOpen(false)
+        }
+        const escape = (event) => {
+          if (event.key === 'Escape') setOpen(false)
+        }
+        document.addEventListener('pointerdown', outside)
+        document.addEventListener('keydown', escape)
+        return () => {
+          document.removeEventListener('pointerdown', outside)
+          document.removeEventListener('keydown', escape)
+        }
+      }, [open])
+
+      if (state.phase === 'loading' || state.phase === 'empty') return null
+
+      const ready = state.phase === 'ready'
+      const rows = ready ? quotaRows(state.data, t, Date.now()) : []
+      const summary = ready && rows.length > 0 ? quotaSummary(rows) : t('quota.unavailable')
+      const aria = ready && rows.length > 0 ? t('quota.aria', { summary }) : t('quota.label')
+
+      const refresh = async () => {
+        setRefreshing(true)
+        await load(true)
+        if (alive.current) setRefreshing(false)
+      }
+
+      const trigger = h('button', {
+        key: 'trigger',
+        type: 'button',
+        className: 'dsh-cc-quota-trigger',
+        'aria-haspopup': 'dialog',
+        'aria-expanded': open,
+        'aria-label': aria,
+        title: aria,
+        onClick: () => { setOpen(!open) },
+        style: {
+          boxSizing: 'border-box',
+          border: 'none',
+          borderRadius: 'var(--dsw-radius-sm)',
+          background: open ? 'var(--dsw-alias-interactive-bg-hover)' : 'transparent',
+          color: open ? 'var(--dsw-alias-label-secondary)' : 'var(--dsw-alias-label-tertiary)',
+          font: 'inherit',
+          fontVariantNumeric: 'tabular-nums',
+          lineHeight: 'inherit',
+          whiteSpace: 'nowrap',
+          cursor: 'pointer',
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 6,
+          padding: '1px 8px',
+        },
+      }, [
+        h(QuotaIcon, { key: 'icon' }),
+        h('span', { key: 'label', style: { overflow: 'hidden', textOverflow: 'ellipsis' } }, summary),
+      ])
+
+      const panel = h('div', {
+        key: 'panel',
+        role: 'dialog',
+        'aria-label': t('quota.title'),
+        style: {
+          position: 'absolute',
+          bottom: 'calc(100% + 8px)',
+          left: '50%',
+          transform: 'translateX(-50%)',
+          zIndex: 1100,
+          boxSizing: 'border-box',
+          width: 264,
+          maxWidth: 'calc(100vw - 24px)',
+          padding: 12,
+          borderRadius: 'var(--dsw-radius-lg)',
+          background: 'var(--dsw-specific-menu)',
+          boxShadow: 'var(--dsw-elevation-prominent)',
+          backdropFilter: 'var(--dsw-menu-backdrop-filter)',
+          color: 'var(--dsw-alias-label-secondary)',
+          font: 'inherit',
+          fontSize: 12,
+          lineHeight: '20px',
+          fontVariantNumeric: 'tabular-nums',
+        },
+      }, [
+        h('div', { key: 'head', style: { display: 'flex', alignItems: 'center', gap: 6 } }, [
+          h(QuotaIcon, { key: 'icon' }),
+          h('span', {
+            key: 'title',
+            style: { color: 'var(--dsw-alias-label-primary)', fontWeight: 500 },
+          }, t('quota.title')),
+          ready && state.data?.plan?.name !== undefined
+            ? h('span', {
+                key: 'plan',
+                style: { marginLeft: 'auto', color: 'var(--dsw-alias-label-tertiary)' },
+              }, t('quota.plan', { plan: state.data.plan.name }))
+            : null,
+        ]),
+        ready && state.data?.exceeded === true
+          ? h('div', {
+              key: 'limited',
+              style: {
+                marginTop: 6,
+                color: 'var(--dsw-alias-state-error-primary)',
+                fontSize: 11,
+                lineHeight: '16px',
+              },
+            }, t('quota.limited'))
+          : null,
+        ready && rows.length === 0
+          ? h('div', {
+              key: 'none',
+              style: {
+                marginTop: 8,
+                color: 'var(--dsw-alias-label-tertiary)',
+                fontSize: 11,
+                lineHeight: '16px',
+              },
+            }, t('quota.none'))
+          : null,
+        ...rows.map(row => h('div', { key: row.key, style: { marginTop: 10 } }, [
+          h('div', {
+            key: 'head',
+            style: { display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 12 },
+          }, [
+            h('span', { key: 'label' }, row.label),
+            h('span', {
+              key: 'value',
+              style: { color: 'var(--dsw-alias-label-primary)', fontWeight: 500 },
+            }, quotaPercent(row.percent)),
+          ]),
+          h('div', {
+            key: 'bar',
+            style: {
+              height: 4,
+              margin: '6px 0 4px',
+              borderRadius: 999,
+              background: 'var(--dsw-alias-interactive-bg-hover)',
+              overflow: 'hidden',
+            },
+          }, h('div', {
+            style: {
+              width: `${Math.min(100, Math.max(0, row.percent))}%`,
+              height: '100%',
+              background: quotaTint(row.percent),
+            },
+          })),
+          h('div', {
+            key: 'used',
+            style: { color: 'var(--dsw-alias-label-tertiary)', fontSize: 11, lineHeight: '16px' },
+          }, row.used),
+          row.note === undefined ? null : h('div', {
+            key: 'note',
+            style: { color: 'var(--dsw-alias-label-tertiary)', fontSize: 11, lineHeight: '16px' },
+          }, row.note),
+        ])),
+        h('div', {
+          key: 'foot',
+          style: {
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            marginTop: 12,
+            paddingTop: 10,
+            borderTop: '0.5px solid var(--dsw-alias-border-l2)',
+          },
+        }, [
+          ready
+            ? h('span', {
+                key: 'updated',
+                style: { flex: '1 1 auto', color: 'var(--dsw-alias-label-tertiary)', fontSize: 11, lineHeight: '16px' },
+              }, t('quota.updated', { time: quotaClock(state.data?.fetchedAt) }))
+            : h('span', {
+                key: 'error',
+                role: 'alert',
+                style: { flex: '1 1 auto', color: 'var(--dsw-alias-state-error-primary)', fontSize: 11, lineHeight: '16px' },
+              }, t('quota.failed', { message: state.error })),
+          h('button', {
+            key: 'refresh',
+            type: 'button',
+            disabled: refreshing,
+            onClick: () => { void refresh() },
+            style: {
+              boxSizing: 'border-box',
+              height: 24,
+              padding: '0 10px',
+              border: '0.5px solid var(--dsw-alias-border-l3)',
+              borderRadius: 'var(--dsw-radius-md)',
+              background: 'transparent',
+              color: 'var(--dsw-alias-label-secondary)',
+              font: 'inherit',
+              fontSize: 12,
+              lineHeight: '18px',
+              cursor: refreshing ? 'default' : 'pointer',
+              opacity: refreshing ? 0.5 : 1,
+              flex: 'none',
+            },
+          }, refreshing ? t('quota.refreshing') : t('quota.refresh')),
+        ]),
+      ])
+
+      return h('div', {
+        ref: rootRef,
+        'data-composer-quota': 'commandcode',
+        style: {
+          position: 'relative',
+          display: 'inline-flex',
+          flex: 'none',
+          minWidth: 0,
+          fontSize: 'calc(var(--dsh-content-font-size-secondary, 13px) - 1px)',
+          lineHeight: 'calc(20px + var(--dsh-content-font-delta-secondary, 0px))',
+        },
+      }, [trigger, open ? panel : null])
     }
 
     /**
@@ -341,11 +755,49 @@ window.__ModuleLoader__.load({
         return response.value
       }
 
+      /**
+       * Ask the host half for the current quota reading. Only the host knows
+       * the stored key, so the browser never calls Command Code itself.
+       * @param force - bypass the host's short-lived cache.
+       * @returns the host snapshot, including `configured: false` with no key.
+       */
+      const fetchQuota = async (force) => {
+        const rpc = ctx.get('connection')?.rpc
+        if (rpc === undefined || typeof rpc.call !== 'function') throw new Error(t('noHost'))
+        const response = await rpc.call('/api', `${RPC_NAMESPACE}/usage`, { args: { force: force === true } })
+        if (response?.ok !== true) {
+          const failure = response?.error
+          throw new Error(typeof failure === 'string' ? failure : failure?.message ?? t('noHost'))
+        }
+        return response.value
+      }
+
+      // Hover styling for the quota trigger; the rest is inline to stay
+      // self-contained, but inline styles cannot express a pseudo-class.
+      const styleId = 'dsh-commandcode/quota'
+      if (typeof document !== 'undefined' && document.querySelector(`style[data-plugin-css="${styleId}"]`) === null) {
+        const style = document.createElement('style')
+        style.dataset.plugin = 'dsh-commandcode'
+        style.dataset.pluginCss = styleId
+        style.textContent = '.dsh-cc-quota-trigger:hover{'
+          + 'background:var(--dsw-alias-interactive-bg-hover);'
+          + 'color:var(--dsw-alias-label-secondary)}'
+        document.head.appendChild(style)
+      }
+
       ctx.slots.inject('settings.models.provider-card', () => ctx.slots.register({
         name: 'settings.models.provider-card',
         key: CARD_KEY,
         inject: () => ({ t, saveKey, testKey, keyRef: KEY_REF }),
       }, KeyCard))
+
+      ctx.slots.inject('conversation.composer.dock', () => ctx.slots.register({
+        name: 'conversation.composer.dock',
+        id: 'commandcode-quota',
+        order: 2,
+        locale: NS,
+        inject: () => ({ t, fetchQuota }),
+      }, QuotaBar))
     }
 
     return { inject, apply }

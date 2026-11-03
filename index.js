@@ -139,6 +139,12 @@ export const Config = z.object({
   http1: z.boolean().default(false).volatile(),
   /** Catalog rescan interval in minutes. */
   refreshMinutes: z.number().step(1).min(1).max(1440).default(DEFAULT_REFRESH_MINUTES).volatile(),
+  /**
+   * Keep the composer quota pill visible even while another provider is
+   * selected. This is a browser preference: Settings → General writes it
+   * through the settings document, and the client half reads it back live.
+   */
+  alwaysShowUsage: z.boolean().default(false).volatile(),
 })
 
 /** Read a volatile config reference (or a plain value, outside the Loader). */

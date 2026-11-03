@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { apply } from '../index.js'
+import { apply, Config } from '../index.js'
 import { DEFAULT_CLI_VERSION } from '../lib/version.js'
 
 const MARKDOWN = `# Command Code Models
@@ -327,4 +327,10 @@ test('a failed subscription keeps the two rolling windows and hides only the mon
   } finally {
     globalThis.fetch = originalFetch
   }
+})
+
+
+test('the always-show usage preference is part of the settings schema', () => {
+  assert.equal(Config({}).alwaysShowUsage.get(), false)
+  assert.equal(Config({ alwaysShowUsage: true }).alwaysShowUsage.get(), true)
 })

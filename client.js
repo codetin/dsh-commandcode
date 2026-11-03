@@ -21,11 +21,26 @@ window.__ModuleLoader__.load({
   factory(require) {
     const React = require('react')
     const h = React.createElement
+    /**
+     * The shell's standard controls. The settings switch must be the same
+     * primitive the host rows use, or it drifts from the real control; the row
+     * still owns a local fallback for shells that do not expose the module.
+     */
+    const primitives = (() => {
+      try {
+        return require('@deepseek-ai/dsh-client-ui-primitives')
+      } catch (_missingPrimitives) {
+        return undefined
+      }
+    })()
+    const StandardSwitch = primitives?.Switch
 
     /** Fixed credential reference shared with the Host adapter. */
     const KEY_REF = 'COMMANDCODE_API_KEY'
     /** Loader entry id of the provider row; the page dispatches this as entryKey. */
     const CARD_KEY = 'commandcode-provider'
+    /** Host entry id whose settings namespace also backs the always-show switch. */
+    const SETTINGS_NS = CARD_KEY
     /** Client locale namespace owned by this plugin. */
     const NS = 'commandcode'
     /** Provider route id the quota belongs to; the dock entry is hidden for every other model. */
@@ -75,6 +90,9 @@ window.__ModuleLoader__.load({
       'quota.none': '暂无滚动额度窗口',
       'quota.extra': '充值 {purchased} · 赠送 {free}',
       'quota.aria': 'Command Code 额度：{summary}',
+      'quota.setting.title': '始终展示CommandCode用量统计',
+      'quota.setting.description': '打开后，即使当前模型不是 Command Code，对话底部也会显示 Command Code 的 5 小时 / 周 / 月用量；关闭时只在选择 Command Code 模型时显示。',
+      'quota.setting.failed': '保存失败，请重试。',
     }
 
     const en = {
@@ -118,6 +136,9 @@ window.__ModuleLoader__.load({
       'quota.none': 'No rolling quota windows reported',
       'quota.extra': 'Extra {purchased} · free {free}',
       'quota.aria': 'Command Code quota: {summary}',
+      'quota.setting.title': 'Always show Command Code usage stats',
+      'quota.setting.description': 'Keep the Command Code 5-hour, weekly, and monthly usage in the chat status bar even when another model is selected. When off, it appears only for Command Code models.',
+      'quota.setting.failed': 'Could not save the setting. Try again.',
     }
 
     /** Failure text of anything thrown across the card's awaits. */
@@ -239,11 +260,11 @@ window.__ModuleLoader__.load({
      * activation, once a minute, and when the page becomes visible. Clicking
      * opens the full reading with reset countdowns and the remaining credit
      * balance; the 刷新 button bypasses the host's short cache.
-     * @param props - injected copy, the host quota call, and the session
-     *   projection selector the slot kit supplies.
+     * @param props - injected copy, the host quota call, the session
+     *   projection selector, and the settings switch hook the slot kit supplies.
      * @returns the pill and its panel, or nothing for another provider.
      */
-    function QuotaBar({ t, fetchQuota, useProjection, pollMs = QUOTA_POLL_MS }) {
+    function QuotaBar({ t, fetchQuota, useProjection, useQuotaConfig, pollMs = QUOTA_POLL_MS }) {
       const [state, setState] = React.useState({ phase: 'loading' })
       const [open, setOpen] = React.useState(false)
       const [refreshing, setRefreshing] = React.useState(false)
@@ -254,7 +275,10 @@ window.__ModuleLoader__.load({
       // `modelSelection` projection; `next` is the active provider/model.
       const project = typeof useProjection === 'function' ? useProjection : noProjection
       const selection = project('modelSelection')
-      const active = selection?.next?.provider === PROVIDER_ID
+      // Settings → General can override the provider gate for every conversation.
+      const settings = typeof useQuotaConfig === 'function' ? useQuotaConfig : noProjection
+      const alwaysShow = settings((snapshot) => snapshot?.value?.alwaysShowUsage === true) === true
+      const active = alwaysShow || selection?.next?.provider === PROVIDER_ID
 
       const load = React.useCallback(async (force) => {
         const current = ++ticket.current
@@ -517,6 +541,123 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * Settings → General switch that pins the quota pill on for every
+     * conversation. The value lives in this plugin's settings section, so the
+     * quota component sees it live through the shared settings mirror.
+     * @param props - the settings value hook, the writer, and localized copy.
+     * @returns the General Settings row.
+     */
+    function AlwaysShowUsageRow({ useQuotaConfig, setAlwaysShow, t }) {
+      const read = typeof useQuotaConfig === 'function' ? useQuotaConfig : noProjection
+      const enabled = read((snapshot) => snapshot?.value?.alwaysShowUsage === true) === true
+      const [busy, setBusy] = React.useState(false)
+      const [failed, setFailed] = React.useState(false)
+
+      const toggle = async (next) => {
+        if (busy) return
+        const target = typeof next === 'boolean' ? next : !enabled
+        setFailed(false)
+        setBusy(true)
+        try {
+          await setAlwaysShow(target)
+        } catch {
+          setFailed(true)
+        } finally {
+          setBusy(false)
+        }
+      }
+
+      // The host's own switch first; the hand-rolled control is only a fallback
+      // for a shell whose module table omits the primitives package.
+      const control = StandardSwitch !== undefined && StandardSwitch !== null
+        ? h(StandardSwitch, {
+            key: 'switch',
+            checked: enabled,
+            disabled: busy,
+            label: t('quota.setting.title'),
+            onChange: (next) => { void toggle(next) },
+          })
+        : h('button', {
+            key: 'switch',
+            type: 'button',
+            role: 'switch',
+            className: 'dsh-cc-quota-switch',
+            'aria-checked': enabled,
+            'aria-label': t('quota.setting.title'),
+            disabled: busy,
+            onClick: () => { void toggle(!enabled) },
+            style: {
+              boxSizing: 'border-box',
+              position: 'relative',
+              width: 36,
+              height: 20,
+              padding: 0,
+              border: 'none',
+              borderRadius: 999,
+              background: enabled
+                ? 'var(--dsw-alias-state-business-primary)'
+                : 'var(--dsw-alias-interactive-bg-hover-solid)',
+              cursor: busy ? 'default' : 'pointer',
+              opacity: busy ? 0.5 : 1,
+              flex: 'none',
+              transition: 'background .12s',
+            },
+          }, h('span', {
+            'aria-hidden': true,
+            style: {
+              position: 'absolute',
+              top: 2,
+              left: 2,
+              width: 16,
+              height: 16,
+              borderRadius: '50%',
+              background: 'var(--dsw-alias-switch-thumb, var(--dsw-alias-label-primary-foreground))',
+              transform: enabled ? 'translateX(16px)' : 'translateX(0)',
+              transition: 'transform .12s',
+              display: 'block',
+            },
+          }))
+
+      return h('div', {
+        style: {
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: 24,
+          padding: '16px 0',
+          borderBottom: '0.5px solid var(--dsw-alias-border-l2)',
+        },
+      }, [
+        h('div', { key: 'copy', style: { minWidth: 0 } }, [
+          h('div', {
+            key: 'title',
+            style: { fontSize: 14, lineHeight: '20px' },
+          }, t('quota.setting.title')),
+          h('div', {
+            key: 'description',
+            style: {
+              color: 'var(--dsw-alias-label-secondary)',
+              marginTop: 4,
+              fontSize: 12,
+              lineHeight: '18px',
+            },
+          }, t('quota.setting.description')),
+          failed ? h('div', {
+            key: 'failed',
+            role: 'alert',
+            style: {
+              color: 'var(--dsw-alias-state-error-primary)',
+              marginTop: 4,
+              fontSize: 12,
+              lineHeight: '18px',
+            },
+          }, t('quota.setting.failed')) : null,
+        ]),
+        control,
+      ])
+    }
+
+    /**
      * One key card, rendered inside the Command Code provider row.
      * @param props - injected copy, credential operations, and the host key
      *   test, plus the slot's owner props (`keyConfigured` is the page's
@@ -745,8 +886,8 @@ window.__ModuleLoader__.load({
       ])
     }
 
-    /** Services this client half needs before it can register its card. */
-    const inject = ['slots', 'locale', 'remote', 'remote.credentials', 'connection']
+    /** Services this client half needs before it can register its contributions. */
+    const inject = ['slots', 'locale', 'remote', 'remote.credentials', 'connection', 'configForms']
 
     /**
      * Register the key card on the Models page.
@@ -755,6 +896,9 @@ window.__ModuleLoader__.load({
     function apply(ctx) {
       ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'commandcode: copy dictionaries')
       const t = ctx.locale.bind(NS)
+      // The provider entry's own settings namespace also carries the quota
+      // preference, so Settings → General and the composer read one value.
+      const quotaSettings = ctx.configForms.get(SETTINGS_NS)
 
       const saveKey = async (value) => {
         const response = await ctx.remote.credentials.set(KEY_REF, value)
@@ -795,8 +939,8 @@ window.__ModuleLoader__.load({
         return response.value
       }
 
-      // Hover styling for the quota trigger; the rest is inline to stay
-      // self-contained, but inline styles cannot express a pseudo-class.
+      // Hover and focus styling for the quota controls; the rest is inline to
+      // stay self-contained, but inline styles cannot express a pseudo-class.
       const styleId = 'dsh-commandcode/quota'
       if (typeof document !== 'undefined' && document.querySelector(`style[data-plugin-css="${styleId}"]`) === null) {
         const style = document.createElement('style')
@@ -805,6 +949,8 @@ window.__ModuleLoader__.load({
         style.textContent = '.dsh-cc-quota-trigger:hover{'
           + 'background:var(--dsw-alias-interactive-bg-hover);'
           + 'color:var(--dsw-alias-label-secondary)}'
+          + '.dsh-cc-quota-switch:focus-visible{outline:2px solid '
+          + 'var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));outline-offset:2px}'
         document.head.appendChild(style)
       }
 
@@ -819,8 +965,23 @@ window.__ModuleLoader__.load({
         id: 'commandcode-quota',
         order: 2,
         locale: NS,
-        inject: () => ({ t, fetchQuota }),
+        inject: () => ({ t, fetchQuota, hooks: { quotaConfig: quotaSettings } }),
       }, QuotaBar))
+
+      ctx.slots.inject('settings.general.item', () => ctx.slots.register({
+        name: 'settings.general.item',
+        id: 'commandcode-always-show-usage',
+        order: 20,
+        locale: NS,
+        inject: () => ({
+          t,
+          hooks: { quotaConfig: quotaSettings },
+          setAlwaysShow: async (enabled) => {
+            const saved = await quotaSettings.set('alwaysShowUsage', enabled)
+            if (!saved) throw new Error(t('quota.setting.failed'))
+          },
+        }),
+      }, AlwaysShowUsageRow))
     }
 
     return { inject, apply }

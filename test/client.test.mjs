@@ -20,7 +20,7 @@ let imports = 0
  * @param react - object the factory receives for `require('react')`.
  * @returns the loader entry the module registered.
  */
-async function loadClient(react) {
+async function loadClient(react, primitives) {
   let loaded
   globalThis.window = {
     __ModuleLoader__: {
@@ -29,6 +29,7 @@ async function loadClient(react) {
           id: entry.id,
           module: entry.factory((name) => {
             if (name === 'react') return react
+            if (name === '@deepseek-ai/dsh-client-ui-primitives' && primitives !== undefined) return primitives
             throw new Error(`unexpected require(${name})`)
           }),
         }
@@ -107,14 +108,38 @@ function createReact() {
 const t = (key, values) => (values === undefined ? key : `${key}${JSON.stringify(values)}`)
 
 /**
+ * A ConfigFormController stand-in: one settings snapshot plus the setter the
+ * General row writes through, with the listener channel a hook source needs.
+ * @param [initial] - starting settings value.
+ * @returns the form face.
+ */
+function configForm(initial = { alwaysShowUsage: false }) {
+  let snapshot = { status: 'ready', value: { ...initial }, revision: 1, writable: true }
+  const listeners = new Set()
+  return {
+    getSnapshot: () => snapshot,
+    subscribe(listener) {
+      listeners.add(listener)
+      return () => { listeners.delete(listener) }
+    },
+    async set(field, value) {
+      snapshot = { ...snapshot, revision: snapshot.revision + 1, value: { ...snapshot.value, [field]: value } }
+      for (const listener of [...listeners]) listener()
+      return true
+    },
+  }
+}
+
+/**
  * A client context that captures every registered slot and its inject face.
  * @param react - the React stand-in the loaded factory sees.
  * @param faces - credential operations and the browser rpc face.
  * @returns the key card registration plus every slot by name.
  */
 async function registerCard(react, faces) {
-  const loaded = await loadClient(react)
+  const loaded = await loadClient(react, faces.primitives)
   const registrations = new Map()
+  const form = faces.configForm ?? configForm()
   const ctx = {
     effect(fn) {
       const dispose = fn()
@@ -133,12 +158,13 @@ async function registerCard(react, faces) {
       },
     },
     remote: { credentials: faces.credentials },
+    configForms: { get: () => form },
     get: key => (key === 'connection' ? { rpc: faces.rpc } : undefined),
   }
   loaded.module.apply(ctx)
   const card = registrations.get('settings.models.provider-card')
   assert.equal(typeof card?.component, 'function')
-  return { ...card, bySlot: registrations }
+  return { ...card, bySlot: registrations, configForm: form }
 }
 
 /** Every element of a rendered tree, depth first. */
@@ -220,7 +246,7 @@ test('client half registers the key card and the composer quota pill', async () 
   })
 
   assert.equal(loaded.id, packageName())
-  assert.deepEqual(loaded.module.inject, ['slots', 'locale', 'remote', 'remote.credentials', 'connection'])
+  assert.deepEqual(loaded.module.inject, ['slots', 'locale', 'remote', 'remote.credentials', 'connection', 'configForms'])
 
   const ctx = {
     effect(fn) {
@@ -256,6 +282,7 @@ test('client half registers the key card and the composer quota pill', async () 
         },
       },
     },
+    configForms: { get: () => configForm() },
     get: () => undefined,
   }
 
@@ -267,11 +294,12 @@ test('client half registers the key card and the composer quota pill', async () 
     for (const key of [
       'label', 'edit', 'test', 'testing', 'cancel', 'save', 'testOk', 'testFailed', 'saved', 'empty', 'noHost',
       'quota.fiveHour', 'quota.weekly', 'quota.monthly', 'quota.title', 'quota.refresh', 'quota.failed',
+      'quota.setting.title', 'quota.setting.description', 'quota.setting.failed',
     ]) {
       assert.equal(typeof dict[key], 'string', `${key} copy is missing`)
     }
   }
-  assert.deepEqual(calls.slots, ['settings.models.provider-card', 'conversation.composer.dock'])
+  assert.deepEqual(calls.slots, ['settings.models.provider-card', 'conversation.composer.dock', 'settings.general.item'])
 
   const card = calls.registrations.find(entry => entry.opts.name === 'settings.models.provider-card')
   assert.equal(card.opts.key, 'commandcode-provider')
@@ -286,6 +314,14 @@ test('client half registers the key card and the composer quota pill', async () 
   assert.equal(quota.opts.order, 2)
   assert.equal(typeof quota.component, 'function')
   assert.equal(typeof quota.injected.fetchQuota, 'function')
+  assert.ok(quota.injected.hooks.quotaConfig !== undefined)
+
+  const row = calls.registrations.find(entry => entry.opts.name === 'settings.general.item')
+  assert.equal(row.opts.id, 'commandcode-always-show-usage')
+  assert.equal(row.opts.order, 20)
+  assert.equal(typeof row.component, 'function')
+  assert.ok(row.injected.hooks.quotaConfig !== undefined)
+  assert.equal(typeof row.injected.setAlwaysShow, 'function')
 })
 
 test('the card stays collapsed until 编辑, then tests the typed key through the host', async () => {
@@ -422,18 +458,22 @@ function quotaTrigger(tree) {
 }
 
 /**
- * Mount the quota entry with the standard session projection seat the slot kit
- * would supply. The default selects a Command Code model.
+ * Mount the quota entry with the standard session projection and settings
+ * switch seats the slot kit would supply. The defaults select a Command Code
+ * model with the always-show preference off.
  * @param rendered - the React stand-in mount surface.
  * @param quota - the registered dock entry.
  * @param [projection] - `useProjection` stand-in returning a modelSelection value.
+ * @param [extra] - additional props, such as an always-show `useQuotaConfig`.
  * @returns the tree getter.
  */
-function mountQuota(rendered, quota, projection) {
+function mountQuota(rendered, quota, projection, extra = {}) {
   return rendered.mount(quota.component, {
     ...quota.injected,
     pollMs: 0,
     useProjection: projection ?? (() => ({ next: { provider: 'commandcode', model: 'deepseek/deepseek-v4-flash' } })),
+    useQuotaConfig: () => false,
+    ...extra,
   })
 }
 
@@ -527,4 +567,82 @@ test('the quota pill is hidden and never polled while another provider is select
   await settled()
   assert.equal(tree(), null)
   assert.equal(rpc.calls.length, 0, 'another provider never touches the Command Code quota API')
+})
+
+test('the always-show preference keeps the quota pill under another provider', async () => {
+  const now = Date.now()
+  const rpc = rpcFace({
+    ok: true,
+    value: {
+      configured: true,
+      fetchedAt: now,
+      windows: { fiveHour: { used: 0.5, limit: 3, percent: 16.7, resetsAt: now + 3_600_000 } },
+      balance: { purchased: 0, free: 0 },
+    },
+  })
+  const rendered = createReact()
+  const card = await registerCard(rendered.react, { credentials: credentialOps([]), rpc: rpc.face })
+  const quota = card.bySlot.get('conversation.composer.dock')
+  const tree = mountQuota(rendered, quota, () => ({ next: { provider: 'deepseek', model: 'deepseek-v4' } }), {
+    useQuotaConfig: () => true,
+  })
+
+  await settled()
+  const trigger = quotaTrigger(tree())
+  assert.ok(trigger !== undefined)
+  assert.equal(textOf(trigger), 'quota.fiveHour 17%')
+  assert.equal(rpc.calls.length, 1)
+})
+
+test('the General settings switch persists 始终展示CommandCode用量统计', async () => {
+  const form = configForm({ alwaysShowUsage: false })
+  const rendered = createReact()
+  const card = await registerCard(rendered.react, {
+    credentials: credentialOps([]),
+    rpc: rpcFace({ ok: true, value: {} }).face,
+    configForm: form,
+  })
+  const row = card.bySlot.get('settings.general.item')
+  const tree = rendered.mount(row.component, {
+    ...row.injected,
+    useQuotaConfig: selector => selector(form.getSnapshot()),
+  })
+
+  const toggle = elements(tree()).find(element => element.type === 'button' && element.props.role === 'switch')
+  assert.equal(toggle.props['aria-checked'], false)
+  assert.equal(toggle.props['aria-label'], t('quota.setting.title'))
+
+  toggle.props.onClick()
+  await settled()
+
+  assert.equal(form.getSnapshot().value.alwaysShowUsage, true)
+  const after = elements(tree()).find(element => element.type === 'button' && element.props.role === 'switch')
+  assert.equal(after.props['aria-checked'], true)
+})
+
+test('the always-show row uses the standard Switch primitive when the shell exposes it', async () => {
+  const StandardSwitch = function StandardSwitch() { return null }
+  const form = configForm({ alwaysShowUsage: false })
+  const rendered = createReact()
+  const card = await registerCard(rendered.react, {
+    credentials: credentialOps([]),
+    rpc: rpcFace({ ok: true, value: {} }).face,
+    configForm: form,
+    primitives: { Switch: StandardSwitch },
+  })
+  const row = card.bySlot.get('settings.general.item')
+  const tree = rendered.mount(row.component, {
+    ...row.injected,
+    useQuotaConfig: selector => selector(form.getSnapshot()),
+  })
+
+  const control = elements(tree()).find(element => element.type === StandardSwitch)
+  assert.ok(control !== undefined, 'the row renders the host primitive, not its fallback')
+  assert.equal(control.props.checked, false)
+  assert.equal(control.props.disabled, false)
+  assert.equal(control.props.label, t('quota.setting.title'))
+
+  control.props.onChange(true)
+  await settled()
+  assert.equal(form.getSnapshot().value.alwaysShowUsage, true)
 })
